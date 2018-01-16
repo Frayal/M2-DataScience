@@ -1,0 +1,559 @@
+---
+title: ' LAB SESSION 2: MINI - PROJECT ON GAUSSIAN MIXTURES '
+author: "Blanchet Alexis"
+output:
+  pdf_document:
+    number_sections: yes
+    toc: yes
+  html_document:
+    toc: yes
+  header-includes: \usepackage[french]{babel}, \usepackage[utf8]{inputnc}
+---
+
+#Introduction 
+```{r warning=FALSE}
+#' packages
+
+#install.packages("MASS")
+#install.packages("abind")
+#install.packages("mnormt")
+#install.packages("LaplacesDemon")
+#install.packages("coda")
+
+library(MASS)
+library(abind)
+library(mnormt)
+library(LaplacesDemon)
+library(coda)
+
+source("AlexisBlanchet_functions.R")
+```
+
+let's now see the dataset we will use during the entire lab session:
+```{r echo=FALSE, fig.align="center"}
+########################################
+# creation/visualisation of the dataset
+########################################
+d <- 2 ## dimension
+K <- 3 ## number of mixture components
+N <- 500 ## sample size
+p <- c(3/10, 2/10, 5/10) ## weight parameter
+Mu <- rbind(c(-1, -1), c(0, 1), c(1, -1)) ## centers
+set.seed(1)
+NN <- rmultinom(n = 1, size = N, prob = p)
+## NN: number of points in each cluster
+Sigma <- array(dim = c(d, d, K)) ## the covariance matrices
+X <- matrix(ncol = d, nrow = 0) ## the dataset
+for(j in 1:K){
+  Sigma[, , j] <- rwishart(nu = 5, S = 0.05*diag(d))
+}
+for(j in 1:K){
+  X <- rbind(X, mvrnorm(n=NN[j], mu = Mu[j, ], Sigma=Sigma[, , j]))
+}
+labs <- rep(0, N) ##vector of labels
+count=1
+for(j in 1:K){
+  labs[count:(count+NN[j]-1)] <- j
+  count <- count + NN[j]
+}
+#' Plot the labelled data
+plot(X[,1], X[,2], col=labs)
+```
+
+
+#EM algorithm
+
+##1.Question 
+the coupled equations satisfied by the maximum likelihood estimates ($\rho,\mu_{1:k},\sum_{1:K}$) are:
+$$ \mathbb{E}[X] = \rho.\mu_{1:k}$$
+$$ cov[x] = \sum_{k=1}^K\rho_k(\mu_k\mu_k^t + diag(\mu_{k,i}(1-\mu_{k,i})_i) - \mathbb{E}[X]\mathbb{E}[X]^t$$
+
+##2.Question 
+let's now derive from those the EM algorithm that will solve our Gaussian mixture problem.
+let's have a litlle reminder on the general EM algorithlm:
+E-Step: $$\mathcal{L}_{t}(\theta) = \mathbb{E}[\log p(x,z|\theta)]_{p(z|x,\theta_{t})}$$
+
+M-Step: $$\mathcal{L}_{t}(\theta) = \underset{\theta}{\mathrm{arg max}} ~\mathcal{L}_{t}(\theta)$$
+
+In the Gaussian Mixture model, the EM algorithm becomes :
+
+E-Step: $$\gamma(z_{nk}) = \frac{\pi_{k}.\mathcal{N}(x_{n};\mu_{k}, \Sigma_{k})}{\sum\limits_{j=1}^{K}\pi_{j}.\mathcal{N}(x_{n};\mu_{j}, \Sigma_{j})}$$
+
+M-Step: 
+
+$$\mu_k^{new} = \frac{1}{N_k}\sum\limits_{n=1}^{N}\gamma(z_{nk})x_n $$
+
+$$\Sigma_{k}^{new} = \frac{1}{N_k}\sum\limits_{n=1}^{N}\gamma(z_{nk})(x_n - \mu_k^{new})(x_n - \mu_k^{new})^T$$
+
+$$\pi_{k}^{new} = \frac{N_k}{N} ~~ where ~~ N_k = \sum\limits_{n=1}^{N}\gamma(z_{nk})$$
+we can now implemente the estep,mstep,emalgo functions with those update equations
+
+##3.Question 
+
+let's now test this implementation.
+here we have Kfit = 9 but the real components number is 3 (black ellipses)
+
+```{r echo=FALSE,fig.align="center"}
+
+########################################
+# Test of the EM algorithm
+########################################
+
+Kfit <- 9## try with Kfit= 2,3,4,5 ...
+outputem <- emalgo(x=X,k=Kfit, tol=1e-6)
+## inspect the objective function (stopping criterion)
+#length(outputem$objective)
+## Plot the (labelled) data
+plot(X[,1], X[,2], col = labs, pch = 19)
+## Add the starting points (from kmeans) to the plot
+Init <- initem(X,Kfit)
+points(Init$Mu[,1],Init$Mu[,2], col="orange",
+       pch=18,cex=10*Init$p)
+## add the centers from EM
+points(outputem$last$Mu[,1],outputem$last$Mu[,2], col="blue",
+       pch=18,cex=10*outputem$last$p)
+## add the true centers
+points(Mu[,1],Mu[,2], col="black",pch=8,cex=10*p)
+for(j in 1:Kfit){
+  ellips <- draw_sd(outputem$last$Mu[j,], outputem$last$Sigma[,,j])
+  lines(ellips[1,], ellips[2,], col='blue')
+}
+for(j in 1:K){
+  ellips <- draw_sd(Mu[j,], Sigma[,,j])
+  lines(ellips[1,], ellips[2,], col='black')
+}
+
+plot(outputem$objective)
+
+```
+
+##4.Question  
+we see on the plot above that the objective function to be maximized (the likelihood) increases at each iteration.
+
+#Variational Bayes
+
+##1.Question  
+let's give the coupled equations satisfied byh $\alpha^*,\nu^*,\beta^*,W^*$:
+$$\alpha_k^* = \alpha_0^* + N_k$$
+$$\nu_k^* = \nu_0^* + N_k$$
+$$\beta_k^* = \beta_0^* + N_k$$
+$${W_k^*}^{-1} = {W_k^*}^{-1} + N_k.S_k + \frac{\beta_0.N_k}{\beta_0 + N_k}(\bar{x}_k - m_0)(\bar{x}_k - m_0)^T$$
+$$Where ~~ N_k = \sum\limits_{n=1}^{N}r_{nk} ~~and~~ \mathbb{E}[Z_{nk}] = r_{nk}$$
+
+##2.Question 
+let's complete the code of functions vbMStep, vbEstep and vbalgo
+
+##3.Question  
+and now we test our implementation
+```{r echo=FALSE,fig.align="center"}
+
+#########################'
+#' 3. VB
+#########################' 
+#' Bayesian model: 
+#' p ~ dirichlet(alpha);  alpha = (alpha0, ... , alpha0)
+#' [ xi | p ] ~ Multinomial(p)
+#' [ mu_j | Lambda_j ] ~ Normal(m0, beta0 Lambda_j^(-1))
+#' Lambda_j ~ Wishart(W0, nu0)
+#' [ X| xi=j, mu, Lambda ] ~ Normal (mu_j, Lambda_j^(-1))
+
+#' hyper-parameters : to be varied
+Kfit <- 5 ## try with Kfit= 2,3,4,5 ... 
+alpha0 <- 0.1
+m0 <- rep(0,2)
+beta0 <- 0.1
+W0 <- 1*diag(2)
+nu0 <- 10
+#' Run VB 
+#'
+seed <- 10
+set.seed(seed)
+#### we keep a record of the true VBalgo with good parameters for the last question
+outputvb <- vbalgo(x=X,k=Kfit, alpha0 = alpha0, W0inv = solve(W0),
+                   nu0 = nu0, m0 = m0, beta0=beta0, tol=1e-6)
+outputvb1 <- outputvb
+
+#' plot the lowerbound over iterations 
+plot(outputvb$lowerbound)
+#' show a summary of VB's output
+T <- ncol(outputvb$alphamat)
+outputvb$alphamat[,T]
+outputvb$Marray[,,T]
+#dim(outputvb$Marray)
+#dim(outputvb$Winvarray)
+#print(T)
+```
+
+##4.Question 
+
+let's give the explicit expressions of the variable:
+$$\hat{\rho}_{vb} = \mathbb{E}_{q^*}(\rho) = \mathbb{E}(Dir(\rho | \alpha)) = [\frac{\alpha_k}{\hat{\alpha}}]_k $$
+$$ \hat{\mu}_{j,vb} = \mathbb{E}_{q^*}(\mu_j) = \mathbb{E}(\mathcal{N}(m_j,..) = m_j$$
+$$\hat{\Sigma}_{j,vb} = (\mathbb{E}_{q^*}(\Lambda_j))^{-1} = \mathbb{E}(\mathcal{W}(W_j,\nu_j))^{-1} = (\nu_jW_j)^{-1} $$
+and we now Plot a summary of the corresponding Gaussian mixture 
+```{r echo=FALSE, fig.align="center"}
+#' Visual summary of VB's output :
+#' posterior expectancy of each parameter
+p_vb <- outputvb$alphamat[,T]/sum(outputvb$alphamat[,T])## complete the code
+#print(p_vb)
+## (variational posterior expectancy of mixture weights)
+Mu_vb <-outputvb$Marray[,,T]## complete the code
+## (variational posterior expectancy of mixture centers)
+Sigma_vb <- array(dim=c(d,d,Kfit))
+for(j in 1:Kfit)
+{
+  Sigma_vb[,,j] <- outputvb$Winvarray[,,j,T]/outputvb$Numat[j,T]## complete the code
+  ## (variational posterior expectancy of mixture covariances)
+}
+
+## show the data, true centers and initial positions from K-means
+#graphics.off()
+plot(X[,1], X[,2], col=labs)
+points(Mu[,1],Mu[,2], col="black",pch=8,cex=10*p) 
+set.seed(seed)
+Init <-  initem(X,Kfit)
+points(Init$Mu[,1],Init$Mu[,2], col="orange",pch=18,cex = 10*Init$p)
+## Add a  summary of the VB solution
+nonneg <- which(p_vb>0.001)
+#print(nonneg)
+for(j in nonneg){
+  points(Mu_vb[j,1], Mu_vb[j,2], col="blue",
+         pch=18,cex= 10 * p_vb[j])
+  ellips <- draw_sd(mu = Mu_vb[j,], 
+                    sigma = Sigma_vb[,,j])
+  lines(ellips[1,], ellips[2,], col='blue')
+}
+```
+
+
+##5.Question 
+
+let's now plot use the same code but with different value for $\alpha_0$
+
+```{r echo=FALSE, fig.align="center"}
+#########################'
+#' 3. VB
+#########################' 
+#' Bayesian model: 
+#' p ~ dirichlet(alpha);  alpha = (alpha0, ... , alpha0)
+#' [ xi | p ] ~ Multinomial(p)
+#' [ mu_j | Lambda_j ] ~ Normal(m0, beta0 Lambda_j^(-1))
+#' Lambda_j ~ Wishart(W0, nu0)
+#' [ X| xi=j, mu, Lambda ] ~ Normal (mu_j, Lambda_j^(-1))
+
+#' hyper-parameters : to be varied
+Kfit <- 5 ## try with Kfit= 2,3,4,5 ... 
+alpha0 <-2
+m0 <- rep(0,2)
+beta0 <- 0.1
+W0 <- 1*diag(2)
+nu0 <- 10
+#' Run VB 
+#'
+seed <- 10
+set.seed(seed)
+outputvb <- vbalgo(x=X,k=Kfit, alpha0 = alpha0, W0inv = solve(W0),
+                   nu0 = nu0, m0 = m0, beta0=beta0, tol=1e-6)
+
+plot(outputvb$lowerbound)
+#' show a summary of VB's output
+T <- ncol(outputvb$alphamat)
+#outputvb$alphamat[,T]
+#outputvb$Marray[,,T]
+#dim(outputvb$Marray)
+#dim(outputvb$Winvarray)
+#print(T)
+
+#' Visual summary of VB's output :
+#' posterior expectancy of each parameter
+p_vb <- outputvb$alphamat[,T]/sum(outputvb$alphamat[,T])## complete the code
+#print(p_vb)
+## (variational posterior expectancy of mixture weights)
+Mu_vb <-outputvb$Marray[,,T]## complete the code
+## (variational posterior expectancy of mixture centers)
+Sigma_vb <- array(dim=c(d,d,Kfit))
+for(j in 1:Kfit)
+{
+  Sigma_vb[,,j] <- outputvb$Winvarray[,,j,T]/outputvb$Numat[j,T]## complete the code
+  ## (variational posterior expectancy of mixture covariances)
+}
+
+## show the data, true centers and initial positions from K-means
+#graphics.off()
+plot(X[,1], X[,2], col=labs)
+points(Mu[,1],Mu[,2], col="black",pch=8,cex=10*p) 
+set.seed(seed)
+Init <-  initem(X,Kfit)
+points(Init$Mu[,1],Init$Mu[,2], col="orange",pch=18,cex = 10*Init$p)
+## Add a  summary of the VB solution
+nonneg <- which(p_vb>0.001)
+#print(nonneg)
+for(j in nonneg){
+  points(Mu_vb[j,1], Mu_vb[j,2], col="blue",
+         pch=18,cex= 10 * p_vb[j])
+  ellips <- draw_sd(mu = Mu_vb[j,], 
+                    sigma = Sigma_vb[,,j])
+  lines(ellips[1,], ellips[2,], col='blue')
+}
+```
+here we can see that for values under 1 (other values were tested but not all can be put here) the length of nonneg wich is diplaying the elipse is corresponding to the true number of components wich is 3 whereas for values over 1 (such as 2), the number of ellipses is not neceraly equal to 3.
+
+##6.Question 
+
+let's now test some other values for the other parameters.
+
+```{r echo=FALSE,fig.align="center"}
+#########################'
+#' 3. VB
+#########################' 
+#' Bayesian model: 
+#' p ~ dirichlet(alpha);  alpha = (alpha0, ... , alpha0)
+#' [ xi | p ] ~ Multinomial(p)
+#' [ mu_j | Lambda_j ] ~ Normal(m0, beta0 Lambda_j^(-1))
+#' Lambda_j ~ Wishart(W0, nu0)
+#' [ X| xi=j, mu, Lambda ] ~ Normal (mu_j, Lambda_j^(-1))
+
+#' hyper-parameters : to be varied
+Kfit <- 5 ## try with Kfit= 2,3,4,5 ... 
+alpha0 <-2
+m0 <- rep(-4,2) ###
+beta0 <- 100 ###
+W0 <- 1*diag(2)
+nu0 <- 1000
+#' Run VB 
+#'
+seed <- 10
+set.seed(seed)
+outputvb <- vbalgo(x=X,k=Kfit, alpha0 = alpha0, W0inv = solve(W0),
+                   nu0 = nu0, m0 = m0, beta0=beta0, tol=1e-6)
+
+#' plot the lowerbound over iterations 
+plot(outputvb$lowerbound)
+#' show a summary of VB's output
+T <- ncol(outputvb$alphamat)
+#outputvb$alphamat[,T]
+#outputvb$Marray[,,T]
+#dim(outputvb$Marray)
+#dim(outputvb$Winvarray)
+#print(T)
+
+#' Visual summary of VB's output :
+#' posterior expectancy of each parameter
+p_vb <- outputvb$alphamat[,T]/sum(outputvb$alphamat[,T])## complete the code
+#print(p_vb)
+## (variational posterior expectancy of mixture weights)
+Mu_vb <-outputvb$Marray[,,T]## complete the code
+## (variational posterior expectancy of mixture centers)
+Sigma_vb <- array(dim=c(d,d,Kfit))
+for(j in 1:Kfit)
+{
+  Sigma_vb[,,j] <- outputvb$Winvarray[,,j,T]/outputvb$Numat[j,T]## complete the code
+  ## (variational posterior expectancy of mixture covariances)
+}
+
+## show the data, true centers and initial positions from K-means
+#graphics.off()
+plot(X[,1], X[,2], col=labs)
+points(Mu[,1],Mu[,2], col="black",pch=8,cex=10*p) 
+set.seed(seed)
+Init <-  initem(X,Kfit)
+points(Init$Mu[,1],Init$Mu[,2], col="orange",pch=18,cex = 10*Init$p)
+## Add a  summary of the VB solution
+nonneg <- which(p_vb>0.001)
+#print(nonneg)
+for(j in nonneg)
+  {
+  points(Mu_vb[j,1], Mu_vb[j,2], col="blue",
+         pch=18,cex= 10 * p_vb[j])
+  ellips <- draw_sd(mu = Mu_vb[j,], 
+                    sigma = Sigma_vb[,,j])
+  lines(ellips[1,], ellips[2,], col='blue')
+  }
+```
+m0: changing the inital value m0 is influencing the position of the centroides: shifiting it to the right(positive values) will make the two centroids go up on the right and shifting it to the left(negative values) will make the centroides go to the left.
+
+beta0: this value is changing two things: first higher the value, quicker is the time of computation, higher the value, worse is the result: the ellipses are crossing each other and do not reprensent the actual data set(if we take beta0 equal to 1, 10 or 100 we get some funny results). 
+
+and for nu0 if we put it very low all the elipses will be shawn, if we put i high most won't 
+
+on the plot above i changed all parameters to show their importance.
+# Metropolis-Hastings algorithm
+
+##1.Question 
+
+We Complete the code for the function rproposal in file AlexisBlanchet_functions.R to generate such aproposal.
+
+##2.Question 
+
+We complete the code for the Metropolis-Hastings sampler MHsample.
+In order to do so we use the following formula from Bishop:
+$$\alpha (\theta_t, \theta^*) ~with~ \alpha (s,t) = min(1, \frac{c.\widetilde{\pi}(t).q(t,s)}{c.\widetilde{\pi}(s).q(s,t)})$$
+this allows us to get the acceptance ratio $\alpha (\theta_t, \theta^*)$
+
+
+##3.Question 
+
+We test our implemenatation of the algorithm.
+
+```{r echo=FALSE,fig.align="center"}
+####################################################'
+####' Metropolis-Hastings
+####################################################'
+#' Basic testing for the MH sampler
+alpha0 <- 0.1
+m0 <- rep(0,2)
+beta0 <- 0.1
+W0 <- 1*diag(2)
+nu0 <- 10
+Kmc <- Kfit ## try with different values
+init <- initem(x=X, k=Kmc)
+hpar <- list( alpha0=rep(alpha0, Kmc),
+              m0 = rep(0, d), beta0 = beta0, 
+              W0 = W0, nu0 = nu0)
+
+ppar <- list(var_Mu = 0.001,
+             nu_Sigma = 500,
+             alpha_p = 500) 
+nsample = 5000
+
+set.seed(1)
+pct <- proc.time()
+outputmh <- MHsample(x=X, k=Kmc, nsample= nsample,
+                     init=init, hpar=hpar, ppar=ppar)
+newpct <- proc.time()
+elapsed <- newpct - pct
+elapsed
+outputmh$naccept ## should not be ridiculously low. 
+```
+
+##4.Question 
+
+To obtain the time series, we complete the code of function cdfTrace from file AlexisBlanchet_functions.R.
+
+##5.Question 
+```{r}
+outputmh_1 <- mcmc(cdfTrace(x=c(-1,1), outputmh))
+plot(outputmh_1)
+heidel.diag(outputmh_1)
+```
+from the two results we can say that around  2500 iterations is a good we have already achieve convergence.
+To do so we burn the 2500 first results and we see if the diagnostique returns a stationary distrubution (wich will mean convergence is achieved)
+##6.Question 
+
+```{r echo=FALSE}
+outputmh_1 <- mcmc(cdfTrace(x=c(-1,1), outputmh))
+outputmh_2 <- mcmc(cdfTrace(x=c(-1,-1), outputmh))
+outputmh_3 <- mcmc(cdfTrace(x=c(-1,0), outputmh))
+
+gelman.diag(mcmc.list(outputmh_1,outputmh_2,outputmh_3))
+gelman.plot(mcmc.list(outputmh_1,outputmh_2,outputmh_3))
+```
+here again we can see that 2500 iterations allows us to achieve convergence.
+
+##7.Question 
+
+we complete the code of function MHpredictive, which returns $\hat{f}_{MH}(x)$.
+
+then we plot the desired result together with the true density.(takes most of the time of computation)
+
+```{r,fig.align="center",echo=FALSE}
+#' Predictive density
+xx <- seq(-2,2,length.out=20)
+yy <- xx
+dtrue <- outer(X= xx, Y=yy,
+               FUN = function(x,y){
+                 wrapper(x=x, y=y,
+                         FUN=function(u,v){
+                           exp(gmllk(x = c(u,v), Mu = Mu,
+                                     Sigma = Sigma, p = p))
+                         })
+               })
+
+dpredmh <-  outer(X= xx, Y=yy,FUN = function(x,y){wrapper(x = x, y = y,FUN =function(u,v){MHpredictive(c(u,v),outputmh)})})
+
+breaks <- c(seq(0.01,0.09, length.out=5),seq(0.1,0.3,length.out=5))
+nbreaks <- length(breaks)
+contour(xx,yy, z = dtrue, nlevels=nbreaks, levels = breaks)
+contour(xx,yy, z = dpredmh,  nlevels=nbreaks, levels = breaks,
+                            add=TRUE, col='red')
+
+```
+
+#Predictive distributions versus maximum likelihood distribution
+
+##1.Question 
+
+We complete the code of the function MHpredictiveCdf
+
+##2.Question 
+we complete the following code chunk in order to plot on the same graph, as a function of x, $\phi , \; \hat{\phi}_1 ,\; \hat{\phi}_2 ,\; \hat{\phi}_3$
+
+```{r echo=FALSE,warning=FALSE,fig.align="center"}
+#########################'
+##' predictive Cdf's
+#########################'
+I <- dim(outputem$Muarray)[3]
+
+Pexcess <- rep(0,10)
+Pexcess_em <- Pexcess; Pexcess_vb <- Pexcess; Pexcess_mh <- Pexcess
+thres_vect <- seq(-3, 3, length.out=30)
+for(i in seq_along(thres_vect))
+  {
+  
+  threshold <- rep(thres_vect[i], 2)
+  Pexcess[i] <- 1 - gmcdf(x = threshold, Mu = Mu, Sigma=Sigma, p=p)
+  Pexcess_em[i] <- 1-gmcdf(threshold,outputem$Muarray[,,I],outputem$Sigmaarray[,,,I],outputem$pmat)## complete the code:
+    ##maximum likelihood estimator using EM output
+    
+  Pexcess_vb[i] <- 1-vbPredictiveCdf(threshold,outputvb1$alphamat[,T],outputvb1$Betamat[,T],outputvb1$Marray[,,T],outputvb1$Winvarray[,,,T],outputvb1$Numat[,T])## complete the code:
+    ## posterior predictive estimator using VB output:
+    ## use vbPredictiveCdf
+    
+  Pexcess_mh[i] <- MHpredictiveCdf(threshold,outputmh)## complete the code:
+    ## posterior predictive estimator using MH output:
+    ## use MHpredictiveCdf.
+    
+  }
+ylim <- range(Pexcess, Pexcess_em,Pexcess_vb)
+plot(thres_vect,Pexcess, ylim = ylim)
+lines(thres_vect, Pexcess_vb, col='red')
+lines(thres_vect, Pexcess_em, col='blue')
+lines(thres_vect, Pexcess_mh, col='green')
+```
+
+##3.Question 
+we now consider now the tails of the mixture distribution: we replace the third line in the above code chunk
+
+```{r echo=FALSE,warning=FALSE,fig.align="center"}
+Pexcess <- rep(0,10)
+Pexcess_em <- Pexcess; Pexcess_vb <- Pexcess; Pexcess_mh <- Pexcess
+thres_vect <- seq(1, 5, length.out=30)
+for(i in seq_along(thres_vect))
+{
+  
+  threshold <- rep(thres_vect[i], 2)
+  Pexcess[i] <- 1 - gmcdf(x = threshold, Mu = Mu, Sigma=Sigma, p=p)
+  Pexcess_em[i] <- 1-gmcdf(threshold,outputem$Muarray[,,I],outputem$Sigmaarray[,,,I],outputem$pmat)## complete the code:
+  ##maximum likelihood estimator using EM output
+  
+  Pexcess_vb[i] <- 1-vbPredictiveCdf(threshold,outputvb1$alphamat[,T],outputvb1$Betamat[,T],outputvb1$Marray[,,T],outputvb1$Winvarray[,,,T],outputvb1$Numat[,T])## complete the code:
+  ## posterior predictive estimator using VB output:
+  ## use vbPredictiveCdf
+  
+  Pexcess_mh[i] <- MHpredictiveCdf(threshold,outputmh)## complete the code:
+  ## posterior predictive estimator using MH output:
+  ## use MHpredictiveCdf.
+  
+}
+ylim <- range(Pexcess, Pexcess_em,Pexcess_vb)
+plot(thres_vect,Pexcess, ylim = ylim)
+lines(thres_vect, Pexcess_vb, col='red')
+lines(thres_vect, Pexcess_em, col='blue')
+lines(thres_vect, Pexcess_mh, col='green')
+```
+What we can see is that the Variationnal bayes is following the same line as the MH predictive cdf. Both are godd aproximation of the true cdf represented here par black circles.(the EM algorithm does not have a good Kfit and thus does not feat well to the curve). With other parameters we would observe something different. Also, q has a product form in case of variational inference, so it won't be able to approximate well when it is far from the center as most of the weigth will be at the center and thus attract the fitting of the VB algorithm.
+
+##4.Question 
+
+
+
